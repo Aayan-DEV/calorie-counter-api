@@ -10,7 +10,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 # Load environment variables first
-load_dotenv()
+load_dotenv(override=True)
 
 # Import OpenAI after loading env vars
 try:
@@ -40,7 +40,11 @@ app.add_middleware(
 
 def authenticate_user(credentials: HTTPAuthorizationCredentials):
     """Authenticate API requests"""
-    if credentials.credentials != "k3y":
+    api_secret_key = os.getenv("API_SECRET_KEY")
+    if not api_secret_key:
+        raise HTTPException(status_code=500, detail="API secret key not configured")
+    
+    if credentials.credentials != api_secret_key:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 def extract_nutrition_with_ai(image_bytes: bytes) -> dict:
@@ -316,4 +320,6 @@ async def analyze_nutrition_raw(
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
+    # Add this after load_dotenv() for development
+    load_dotenv(override=True)  # This forces reload of .env variables
     uvicorn.run(app, host="0.0.0.0", port=port)
