@@ -1,11 +1,4 @@
-# Use Python 3.11 slim image
 FROM python:3.11-slim
-
-# Install system dependencies including Tesseract
-RUN apt-get update && apt-get install -y \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
@@ -17,8 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose port
+# Expose port (Railway will override this)
 EXPOSE 8000
 
-# Start the application
-CMD ["python", "app.py"]
+# Use the start script for proper Railway deployment
+CMD ["bash", "start.sh"]
