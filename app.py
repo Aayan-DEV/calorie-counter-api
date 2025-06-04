@@ -55,30 +55,33 @@ def extract_nutrition_with_ai(image_bytes: bytes) -> dict:
         # Convert image to base64
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Highly controlled prompt for exact nutrition extraction
+        # Improved prompt for accurate nutrition label reading
         controlled_prompt = """
-You are a nutrition label analysis expert. Analyze this nutrition label image and extract EXACTLY 4 values.
+You are a nutrition label reading expert. Look at this nutrition facts label image and extract the exact values shown.
 
-IMPORTANT RULES:
-1. Return ONLY a valid JSON object with these exact keys: calories, protein_grams, sugar_grams, carbs_grams
-2. All values must be numbers (integers or decimals) representing amounts per 100 grams
-3. If the label shows a different serving size, convert ALL values to per 100g basis
-4. If any value is not clearly visible, use 0
-5. Do not include any text, explanations, or formatting - ONLY the JSON object
-6. Use decimal points for precision (e.g., 12.5, not 12 or 13)
+CRITICAL INSTRUCTIONS:
+1. Look for the "per 100g" or "per 100 grams" column on the nutrition label
+2. If you see multiple columns (like "per serving" and "per 100g"), ALWAYS use the "per 100g" values
+3. Read the EXACT numbers shown on the label - do not estimate or round
+4. Look for these specific terms:
+   - Energy/Energia/Energie in kcal (NOT kJ) 
+   - Protein/Proteine/Eiweiß
+   - Sugar/Sucre/Zucker (under carbohydrates)
+   - Carbohydrates/Glucides/Kohlenhydrate
 
-Required JSON format:
-{
-  "calories": [number],
-  "protein_grams": [number],
-  "sugar_grams": [number],
-  "carbs_grams": [number]
-}
+5. Return ONLY a JSON object with these exact keys:
+   - "calories": the kcal value per 100g (NOT kJ)
+   - "protein_grams": protein in grams per 100g
+   - "sugar_grams": sugar in grams per 100g  
+   - "carbs_grams": total carbohydrates in grams per 100g
 
-Example output:
-{"calories": 250, "protein_grams": 8.5, "sugar_grams": 12.3, "carbs_grams": 45.2}
+6. If any value is unclear, use 0
+7. Do NOT include any explanations, just the JSON
 
-Analyze the nutrition label and return the JSON:"""
+Example of what I expect:
+{"calories": 539, "protein_grams": 6.3, "sugar_grams": 56.3, "carbs_grams": 57.5}
+
+Now read the nutrition label and return the JSON with the EXACT values shown per 100g:"""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -99,7 +102,7 @@ Analyze the nutrition label and return the JSON:"""
                     ]
                 }
             ],
-            max_tokens=200,
+            max_tokens=150,
             temperature=0.0,  # Zero temperature for consistent results
             top_p=0.1  # Very focused responses
         )
@@ -311,4 +314,4 @@ async def analyze_nutrition_raw(
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
