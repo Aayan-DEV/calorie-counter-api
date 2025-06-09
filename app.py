@@ -19,8 +19,11 @@ try:
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if not openai_api_key:
         print("Warning: OPENAI_API_KEY not found in environment variables")
+        print(f"Current working directory: {os.getcwd()}")
+        print(f"Environment variables loaded: {bool(os.getenv('API_SECRET_KEY'))}")
         client = None
     else:
+        print(f"OpenAI API key loaded: {openai_api_key[:10]}...")
         client = OpenAI(api_key=openai_api_key)
 except Exception as e:
     print(f"Error initializing OpenAI client: {e}")
@@ -41,6 +44,9 @@ app.add_middleware(
 def authenticate_user(credentials: HTTPAuthorizationCredentials):
     """Authenticate API requests"""
     api_secret_key = os.getenv("API_SECRET_KEY")
+    print(f"Expected API key: {api_secret_key}")
+    print(f"Received API key: {credentials.credentials}")
+    
     if not api_secret_key:
         raise HTTPException(status_code=500, detail="API secret key not configured")
     
@@ -320,6 +326,5 @@ async def analyze_nutrition_raw(
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
-    # Add this after load_dotenv() for development
-    load_dotenv(override=True)  # This forces reload of .env variables
+    # Remove the duplicate load_dotenv() call here
     uvicorn.run(app, host="0.0.0.0", port=port)
