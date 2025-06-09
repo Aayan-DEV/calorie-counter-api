@@ -9,22 +9,19 @@ from PIL import Image
 import uvicorn
 from dotenv import load_dotenv
 
-# Load environment variables first
+# Load environment variables
 load_dotenv(override=True)
 
-# Import OpenAI after loading env vars
+# Initialize OpenAI client
 try:
     from openai import OpenAI
-    # Initialize OpenAI client with error handling
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if not openai_api_key:
         print("Warning: OPENAI_API_KEY not found in environment variables")
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Environment variables loaded: {bool(os.getenv('API_SECRET_KEY'))}")
         client = None
     else:
-        print(f"OpenAI API key loaded: {openai_api_key[:10]}...")
         client = OpenAI(api_key=openai_api_key)
+        print("OpenAI client initialized successfully")
 except Exception as e:
     print(f"Error initializing OpenAI client: {e}")
     client = None
@@ -44,17 +41,14 @@ app.add_middleware(
 def authenticate_user(credentials: HTTPAuthorizationCredentials):
     """Authenticate API requests"""
     api_secret_key = os.getenv("API_SECRET_KEY")
-    print(f"Expected API key: {api_secret_key}")
-    print(f"Received API key: {credentials.credentials}")
-    
     if not api_secret_key:
         raise HTTPException(status_code=500, detail="API secret key not configured")
     
     if credentials.credentials != api_secret_key:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-def extract_nutrition_with_ai(image_bytes: bytes) -> dict:
-    """Extract nutrition data using GPT-4o-mini with highly controlled prompt"""
+def extract_nutrition_with_ai(image_bytes):
+    """Extract nutrition data using GPT-4o-mini"""
     if client is None:
         return {
             "success": False,
@@ -62,36 +56,36 @@ def extract_nutrition_with_ai(image_bytes: bytes) -> dict:
         }
     
     try:
-        # Convert image to base64
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Improved prompt for accurate nutrition label reading
-        controlled_prompt = """
-You are a nutrition label reading expert. Look at this nutrition facts label image and extract the exact values shown.
+        prompt = """
+You are a nutrition label reading expert. Extract the exact values from this nutrition facts label.
 
 CRITICAL INSTRUCTIONS:
-1. Look for the "per 100g" or "per 100 grams" column on the nutrition label
-2. If you see multiple columns (like "per serving" and "per 100g"), ALWAYS use the "per 100g" values
-3. Read the EXACT numbers shown on the label - do not estimate or round
-4. Look for these specific terms:
-   - Energy/Energia/Energie in kcal (NOT kJ) 
-   - Protein/Proteine/Eiweiß
-   - Sugar/Sucre/Zucker (under carbohydrates)
-   - Carbohydrates/Glucides/Kohlenhydrate
+1. Look ONLY for "per 100g" or "per 100 grams" values
+2. For CALORIES/ENERGY: 
+   - ONLY extract the kcal value (kilocalories)
+   - IGNORE kJ values (kilojoules) completely
+   - Look for numbers followed by "kcal" or "cal"
+   - Common format: "2252 kJ / 539 kcal" → use 539
+3. Extract these exact values:
+   - Energy/Calories in kcal ONLY (ignore kJ)
+   - Protein in grams
+   - Sugar in grams (usually under carbohydrates section)
+   - Total Carbohydrates in grams
 
-5. Return ONLY a JSON object with these exact keys:
-   - "calories": the kcal value per 100g (NOT kJ)
-   - "protein_grams": protein in grams per 100g
-   - "sugar_grams": sugar in grams per 100g  
-   - "carbs_grams": total carbohydrates in grams per 100g
+4. Return ONLY this JSON format:
+{"calories": X, "protein_grams": X, "sugar_grams": X, "carbs_grams": X}
+
+5. EXAMPLES:
+   - If you see "2252 kJ / 539 kcal" → use calories: 539
+   - If you see "Energy 2252 kJ (539 kcal)" → use calories: 539
+   - If you see only "539 kcal" → use calories: 539
+   - NEVER use the kJ number for calories
 
 6. If any value is unclear, use 0
-7. Do NOT include any explanations, just the JSON
-
-Example of what I expect:
-{"calories": 539, "protein_grams": 6.3, "sugar_grams": 56.3, "carbs_grams": 57.5}
-
-Now read the nutrition label and return the JSON with the EXACT values shown per 100g:"""
+7. Return ONLY the JSON, no explanations
+"""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -99,65 +93,53 @@ Now read the nutrition label and return the JSON with the EXACT values shown per
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "text",
-                            "text": controlled_prompt
-                        },
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
                         }
                     ]
                 }
             ],
             max_tokens=150,
-            temperature=0.0,  # Zero temperature for consistent results
-            top_p=0.1  # Very focused responses
+            temperature=0.0
         )
         
-        # Get AI response
         ai_response = response.choices[0].message.content.strip()
         
-        # Clean response to extract pure JSON
+        # Clean JSON response
         if '```json' in ai_response:
             ai_response = ai_response.split('```json')[1].split('```')[0].strip()
         elif '```' in ai_response:
             ai_response = ai_response.split('```')[1].strip()
         
-        # Remove any extra text before/after JSON
         start_idx = ai_response.find('{')
         end_idx = ai_response.rfind('}') + 1
         if start_idx != -1 and end_idx != 0:
             ai_response = ai_response[start_idx:end_idx]
         
-        # Parse JSON
         nutrition_data = json.loads(ai_response)
         
-        # Validate and ensure all required fields exist
+        # Validate required fields
         required_fields = ['calories', 'protein_grams', 'sugar_grams', 'carbs_grams']
         validated_data = {}
         
         for field in required_fields:
-            if field in nutrition_data:
-                try:
-                    validated_data[field] = float(nutrition_data[field])
-                except (ValueError, TypeError):
-                    validated_data[field] = 0.0
-            else:
+            try:
+                validated_data[field] = float(nutrition_data.get(field, 0))
+            except (ValueError, TypeError):
                 validated_data[field] = 0.0
         
         return {
             "success": True,
-            "nutrition_per_100g": validated_data,
+            "nutrition_data": validated_data,
             "raw_ai_response": ai_response
         }
         
     except json.JSONDecodeError as e:
         return {
             "success": False,
-            "error": f"Invalid JSON from AI: {str(e)}",
+            "error": f"Failed to parse AI response as JSON: {str(e)}",
             "raw_ai_response": ai_response if 'ai_response' in locals() else "No response"
         }
     except Exception as e:
@@ -167,12 +149,10 @@ Now read the nutrition label and return the JSON with the EXACT values shown per
         }
 
 def calculate_nutrition_for_grams(nutrition_per_100g: dict, target_grams: float) -> dict:
-    """Calculate nutrition values for specific gram amount using local math"""
+    """Calculate nutrition values for specific gram amount"""
     try:
-        # Calculate scaling factor
         scaling_factor = target_grams / 100.0
         
-        # Calculate nutrition for target grams
         calculated_nutrition = {
             "calories": round(nutrition_per_100g["calories"] * scaling_factor, 1),
             "protein_grams": round(nutrition_per_100g["protein_grams"] * scaling_factor, 1),
@@ -198,50 +178,42 @@ def calculate_nutrition_for_grams(nutrition_per_100g: dict, target_grams: float)
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    openai_status = "connected" if client else "not configured"
     return {
-        "status": "healthy", 
-        "message": "Nutrition Facts API v3.0 - AI Only",
-        "openai_status": openai_status,
-        "features": ["AI nutrition extraction", "Local calculations", "4 core nutrients"],
-        "analysis_method": "OpenAI GPT-4o-mini only"
+        "status": "healthy",
+        "message": "Nutrition Facts API v3.0",
+        "openai_status": "connected" if client else "not configured",
+        "features": ["AI nutrition extraction", "Local calculations", "4 core nutrients"]
     }
 
 @app.post("/analyze-nutrition")
 async def analyze_nutrition(
-    image: UploadFile = File(...), 
-    grams: float = Form(...), 
+    image: UploadFile = File(...),
+    grams: float = Form(...),
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ):
-    """Analyze nutrition from uploaded image using AI only"""
+    """Analyze nutrition from uploaded image"""
     try:
-        # Authenticate
         authenticate_user(credentials)
         
-        # Validate grams input
         if grams <= 0:
-            raise HTTPException(status_code=400, detail="Grams must be a positive number")
+            raise HTTPException(status_code=400, detail="Grams must be positive")
         
-        # Process image
         image_data = await image.read()
         pil_image = Image.open(io.BytesIO(image_data))
         
-        # Extract nutrition using AI only
         ai_result = extract_nutrition_with_ai(image_data)
         
         if not ai_result["success"]:
             return {
                 "status": "error",
-                "message": "Failed to extract nutrition data with AI",
+                "message": "Failed to extract nutrition data",
                 "error_details": ai_result,
                 "grams": grams,
                 "image_size": list(pil_image.size)
             }
         
-        # Calculate nutrition for requested grams locally
         calculation_result = calculate_nutrition_for_grams(
-            ai_result["nutrition_per_100g"], 
-            grams
+            ai_result["nutrition_data"], grams
         )
         
         if not calculation_result["success"]:
@@ -255,11 +227,12 @@ async def analyze_nutrition(
         
         return {
             "status": "success",
-            "message": "Nutrition analysis completed successfully",
+            "message": "Nutrition analysis completed",
             "grams": grams,
             "image_size": list(pil_image.size),
-            "analysis_method": "ai_vision_only + local_calculation",
-            "nutrition_analysis": calculation_result
+            "analysis_method": "ai_vision + local_calculation",
+            "nutrition_analysis": calculation_result,
+            "ai_response": ai_result.get("raw_ai_response", "No AI response")
         }
         
     except Exception as e:
@@ -267,39 +240,33 @@ async def analyze_nutrition(
 
 @app.post("/analyze-nutrition-raw")
 async def analyze_nutrition_raw(
-    request: Request, 
-    grams: float, 
+    request: Request,
+    grams: float,
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ):
-    """Analyze nutrition from raw image data using AI only"""
+    """Analyze nutrition from raw image data"""
     try:
-        # Authenticate
         authenticate_user(credentials)
         
-        # Validate grams input
         if grams <= 0:
-            raise HTTPException(status_code=400, detail="Grams must be a positive number")
+            raise HTTPException(status_code=400, detail="Grams must be positive")
         
-        # Read raw image data
         image_data = await request.body()
         pil_image = Image.open(io.BytesIO(image_data))
         
-        # Extract nutrition using AI only
         ai_result = extract_nutrition_with_ai(image_data)
         
         if not ai_result["success"]:
             return {
                 "status": "error",
-                "message": "Failed to extract nutrition data with AI",
+                "message": "Failed to extract nutrition data",
                 "error_details": ai_result,
                 "grams": grams,
                 "image_size": list(pil_image.size)
             }
         
-        # Calculate nutrition for requested grams locally
         calculation_result = calculate_nutrition_for_grams(
-            ai_result["nutrition_per_100g"], 
-            grams
+            ai_result["nutrition_data"], grams  # Changed from nutrition_per_100g to nutrition_data
         )
         
         if not calculation_result["success"]:
@@ -313,18 +280,17 @@ async def analyze_nutrition_raw(
         
         return {
             "status": "success",
-            "message": "Nutrition analysis completed successfully",
+            "message": "Nutrition analysis completed",
             "grams": grams,
             "image_size": list(pil_image.size),
-            "analysis_method": "ai_vision_only + local_calculation",
-            "nutrition_analysis": calculation_result
+            "analysis_method": "ai_vision + local_calculation",
+            "nutrition_analysis": calculation_result,
+            "ai_response": ai_result.get("raw_ai_response", "No AI response")
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8000))
-    # Remove the duplicate load_dotenv() call here
     uvicorn.run(app, host="0.0.0.0", port=port)
