@@ -924,6 +924,176 @@ async def analyze_nutrition_raw(
         log_request_end("analyze-nutrition-raw", request_id, start_time, False)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
+# Add this endpoint after the existing endpoints (around line 920)
+
+@app.post("/analyze-nutrition")
+async def analyze_nutrition(
+    image: UploadFile = File(...),
+    grams: float = Form(...),
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Universal nutrition analysis endpoint - tries barcode first, falls back to AI label reading"""
+    request_id = f"universal_{int(time.time() * 1000)}_{id(image)}"
+    start_time = log_request_start("analyze-nutrition", request_id)
+    
+    try:
+        # Authentication
+        logger.info(f"[AUTH] [{request_id}] Authenticating user...")
+        authenticate_user(credentials)
+        
+        # Input validation
+        if grams <= 0:
+            logger.warning(f"[WARN] [{request_id}] Invalid grams value: {grams}")
+            raise HTTPException(status_code=400, detail="Grams must be positive")
+        
+        if not image.filename:
+            logger.warning(f"[WARN] [{request_id}] No image filename provided")
+            raise HTTPException(status_code=400, detail="Image file is required")
+        
+        # Validate file type
+        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+        if image.content_type not in allowed_types:
+            logger.warning(f"[WARN] [{request_id}] Invalid file type: {image.content_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(allowed_types)}")
+        
+        logger.info(f"[FILE] [{request_id}] Reading image ({image.filename}, {image.content_type})...")
+        image_data = await image.read()
+        
+        # Validate file size
+        if len(image_data) == 0:
+            logger.warning(f"[WARN] [{request_id}] Empty image file")
+            raise HTTPException(status_code=400, detail="Image file is empty")
+        
+        if len(image_data) > 10 * 1024 * 1024:  # 10MB limit
+            logger.warning(f"[WARN] [{request_id}] Image too large: {len(image_data)} bytes")
+            raise HTTPException(status_code=400, detail="Image file too large (max 10MB)")
+        
+        logger.info(f"[FILE] [{request_id}] Image read successfully ({len(image_data)} bytes)")
+        
+        # Validate image format
+        try:
+            logger.info(f"[IMAGE] [{request_id}] Processing image with PIL...")
+            pil_image = Image.open(io.BytesIO(image_data))
+            logger.info(f"[IMAGE] [{request_id}] Image processed: {pil_image.size[0]}x{pil_image.size[1]}")
+        except Exception as e:
+            logger.error(f"[ERROR] [{request_id}] Invalid image format: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid image format")
+        
+        # Step 1: Try barcode scanning first
+        logger.info(f"[STEP1] [{request_id}] Step 1: Attempting barcode extraction...")
+        barcode_result = await extract_barcode_local(image_data, request_id)
+        
+        if barcode_result["success"]:
+            logger.info(f"[BARCODE] [{request_id}] Barcode found: {barcode_result['barcode']}")
+            
+            # Step 2: Search product using barcode
+            logger.info(f"[STEP2] [{request_id}] Step 2: Searching product with barcode...")
+            api_result = await search_product_with_multiple_apis(barcode_result["barcode"], "world", request_id)
+            
+            if api_result["success"]:
+                logger.info(f"[BARCODE] [{request_id}] Product found via barcode: {api_result['product_name']}")
+                
+                # Calculate nutrition for requested grams
+                calculation_result = calculate_nutrition_for_grams(
+                    api_result["nutrition_data"], grams, request_id
+                )
+                
+                if calculation_result["success"]:
+                    log_request_end("analyze-nutrition", request_id, start_time, True)
+                    return {
+                        "status": "success",
+                        "message": "Nutrition analysis completed via barcode",
+                        "method": "barcode_scanning",
+                        "barcode": barcode_result["barcode"],
+                        "product_name": api_result["product_name"],
+                        "brands": api_result.get("brands", "Unknown"),
+                        "nutrition_grade": api_result.get("nutrition_grade", "unknown"),
+                        "grams": grams,
+                        "image_size": list(pil_image.size),
+                        "data_source": api_result.get("data_source", "unknown"),
+                        "api_chain_used": api_result.get("api_chain_used", []),
+                        "nutrition_analysis": calculation_result,
+                        "processing_time": api_result.get("processing_time", 0),
+                        "request_id": request_id
+                    }
+                else:
+                    logger.warning(f"[WARN] [{request_id}] Barcode nutrition calculation failed, falling back to AI")
+            else:
+                logger.warning(f"[WARN] [{request_id}] Barcode product search failed, falling back to AI")
+        else:
+            logger.info(f"[INFO] [{request_id}] No barcode found, proceeding with AI analysis")
+        
+        # Step 3: Fallback to AI nutrition label reading
+        logger.info(f"[STEP3] [{request_id}] Step 3: Analyzing nutrition label with AI...")
+        ai_result = await extract_nutrition_with_ai(image_data, request_id)
+        
+        if not ai_result["success"]:
+            logger.error(f"[ERROR] [{request_id}] AI nutrition extraction failed")
+            log_request_end("analyze-nutrition", request_id, start_time, False)
+            raise HTTPException(
+                status_code=422, 
+                detail={
+                    "message": "Failed to analyze nutrition information",
+                    "details": "Could not extract nutrition data via barcode or AI label reading",
+                    "barcode_attempted": barcode_result["success"],
+                    "ai_error": ai_result.get("error", "Unknown AI error"),
+                    "suggestions": [
+                        "Ensure the image shows a clear nutrition label",
+                        "Try a higher resolution image",
+                        "Make sure the nutrition facts are clearly visible",
+                        "Check that the image is not blurry or rotated"
+                    ]
+                }
+            )
+        
+        # Calculate nutrition for requested grams
+        calculation_result = calculate_nutrition_for_grams(
+            ai_result["nutrition_data"], grams, request_id
+        )
+        
+        if not calculation_result["success"]:
+            logger.error(f"[ERROR] [{request_id}] AI nutrition calculation failed")
+            log_request_end("analyze-nutrition", request_id, start_time, False)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Failed to calculate nutrition values",
+                    "details": calculation_result.get("error", "Unknown calculation error"),
+                    "extracted_data": ai_result.get("nutrition_data", {})
+                }
+            )
+        
+        log_request_end("analyze-nutrition", request_id, start_time, True)
+        
+        return {
+            "status": "success",
+            "message": "Nutrition analysis completed via AI label reading",
+            "method": "ai_label_reading",
+            "grams": grams,
+            "image_size": list(pil_image.size),
+            "analysis_method": "ai_vision + local_calculation",
+            "nutrition_analysis": calculation_result,
+            "ai_response": ai_result.get("raw_ai_response", "No AI response"),
+            "processing_time": ai_result.get("processing_time", 0),
+            "barcode_attempted": barcode_result["success"],
+            "request_id": request_id
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (they already have proper status codes)
+        raise
+    except Exception as e:
+        logger.error(f"[ERROR] [{request_id}] Unexpected error: {str(e)}")
+        log_request_end("analyze-nutrition", request_id, start_time, False)
+        raise HTTPException(
+            status_code=500, 
+            detail={
+                "message": "Internal server error",
+                "details": f"Processing error: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
 @app.post("/analyze-nutrition-barcode-manual")
 async def analyze_nutrition_barcode_manual(
     barcode: str = Form(...),
