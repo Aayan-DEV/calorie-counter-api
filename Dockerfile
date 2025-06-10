@@ -4,6 +4,12 @@ WORKDIR /app
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
+# Add before installing Python packages
+RUN apt-get update && apt-get install -y \
+    libzbar0 \
+    libzbar-dev \
+    && rm -rf /var/lib/apt/lists/*
+    
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
